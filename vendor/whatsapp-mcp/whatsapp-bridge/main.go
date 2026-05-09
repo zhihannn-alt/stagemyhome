@@ -416,11 +416,43 @@ func normalizePhoneForStageMyHome(value string) string {
 
 func shouldProcessStageMyHomeSender(sender string) bool {
 	watch := normalizePhoneForStageMyHome(os.Getenv("DEMO_WATCH_PHONE"))
-	if watch == "" {
+	watchLID := strings.TrimSpace(os.Getenv("DEMO_WATCH_LID"))
+	if watch == "" && watchLID == "" {
 		return true
 	}
 	normalizedSender := normalizePhoneForStageMyHome(sender)
-	return strings.HasSuffix(normalizedSender, watch) || strings.HasSuffix(watch, normalizedSender)
+	if watch != "" && (strings.HasSuffix(normalizedSender, watch) || strings.HasSuffix(watch, normalizedSender)) {
+		return true
+	}
+	// Modern WhatsApp uses LIDs instead of phone numbers for sender identity.
+	if watchLID != "" && normalizedSender == normalizePhoneForStageMyHome(watchLID) {
+		return true
+	}
+	return false
+}
+
+// canonicalAgentNumber returns the human-readable phone number to send to the server.
+// Since the bridge has already filtered to the watched sender, we can use DEMO_WATCH_PHONE
+// directly rather than forwarding the opaque LID.
+func canonicalAgentNumber(senderLID string) string {
+	if watch := normalizePhoneForStageMyHome(os.Getenv("DEMO_WATCH_PHONE")); watch != "" {
+		return watch
+	}
+	return senderLID
+}
+
+func shouldProcessStageMyHomeChat(chatJID string) bool {
+	watchChat := strings.TrimSpace(os.Getenv("DEMO_WATCH_CHAT"))
+	if watchChat == "" {
+		return false
+	}
+	return chatJID == watchChat
+}
+
+func logStageMyHomeFilter(sender string, chatJID string, accepted bool) {
+	watch := normalizePhoneForStageMyHome(os.Getenv("DEMO_WATCH_PHONE"))
+	normalizedSender := normalizePhoneForStageMyHome(sender)
+	fmt.Printf("StageMyHome filter: sender=%s normalized=%s chat=%s watch=%s accepted=%t\n", sender, normalizedSender, chatJID, watch, accepted)
 }
 
 func mimeFromMediaType(mediaType string) string {
@@ -436,11 +468,11 @@ func mimeFromMediaType(mediaType string) string {
 	}
 }
 
-func sendTextToStageMyHome(client *whatsmeow.Client, sender string, content string) {
+func sendTextToStageMyHome(client *whatsmeow.Client, sender string, replyTo string, content string) {
 	if strings.TrimSpace(content) == "" {
 		return
 	}
-	req := StageMyHomeTextRequest{AgentNumber: sender, Text: content}
+	req := StageMyHomeTextRequest{AgentNumber: canonicalAgentNumber(sender), Text: content}
 	body, _ := json.Marshal(req)
 	resp, err := http.Post(stageMyHomeBaseURL()+"/api/whatsapp/text", "application/json", bytesReader(body))
 	if err != nil {
@@ -454,11 +486,11 @@ func sendTextToStageMyHome(client *whatsmeow.Client, sender string, content stri
 		return
 	}
 	if payload.Reply != "" {
-		sendWhatsAppMessage(client, sender, payload.Reply, "")
+		sendWhatsAppMessage(client, replyTo, payload.Reply, "")
 	}
 }
 
-func sendPhotoToStageMyHome(client *whatsmeow.Client, sender string, localPath string, mediaType string, filename string) {
+func sendPhotoToStageMyHome(client *whatsmeow.Client, sender string, replyTo string, localPath string, mediaType string, filename string) {
 	bytes, err := os.ReadFile(localPath)
 	if err != nil {
 		fmt.Printf("StageMyHome bridge failed to read media: %v\n", err)
@@ -466,7 +498,7 @@ func sendPhotoToStageMyHome(client *whatsmeow.Client, sender string, localPath s
 	}
 
 	req := StageMyHomeInboundRequest{
-		AgentNumber:       sender,
+		AgentNumber:       canonicalAgentNumber(sender),
 		ProjectName:       "WhatsApp Demo",
 		RecommendedPrompt: "Create bright, listing-ready, photorealistic Singapore property staging. Preserve room geometry and fixed architecture.",
 		Photos: []StageMyHomePhoto{{
@@ -489,7 +521,8 @@ func sendPhotoToStageMyHome(client *whatsmeow.Client, sender string, localPath s
 		return
 	}
 	if payload.NextMessage != "" {
-		sendWhatsAppMessage(client, sender, payload.NextMessage, "")
+		fmt.Printf("StageMyHome sending reply to %s\n", replyTo)
+		sendWhatsAppMessage(client, replyTo, payload.NextMessage, "")
 	}
 }
 
@@ -562,8 +595,12 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
-	if !msg.Info.IsFromMe && !shouldProcessStageMyHomeSender(sender) {
-		return
+	if !msg.Info.IsFromMe {
+		accepted := shouldProcessStageMyHomeChat(chatJID) || shouldProcessStageMyHomeSender(sender) || shouldProcessStageMyHomeSender(msg.Info.Chat.User)
+		logStageMyHomeFilter(sender, chatJID, accepted)
+		if !accepted {
+			return
+		}
 	}
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
@@ -626,13 +663,13 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			go func() {
 				success, downloadedType, downloadedName, localPath, err := downloadMedia(client, messageStore, msg.Info.ID, chatJID)
 				if success && err == nil {
-					sendPhotoToStageMyHome(client, sender, localPath, downloadedType, downloadedName)
+					sendPhotoToStageMyHome(client, sender, chatJID, localPath, downloadedType, downloadedName)
 				} else if err != nil {
 					fmt.Printf("StageMyHome media download failed: %v\n", err)
 				}
 			}()
 		} else {
-			go sendTextToStageMyHome(client, sender, content)
+			go sendTextToStageMyHome(client, sender, chatJID, content)
 		}
 	}
 }
@@ -1191,7 +1228,8 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
 			continue
 		}
-		if !shouldProcessStageMyHomeSender(jid.User) {
+		if !shouldProcessStageMyHomeChat(chatJID) && !shouldProcessStageMyHomeSender(jid.User) {
+			logStageMyHomeFilter(jid.User, chatJID, false)
 			continue
 		}
 
