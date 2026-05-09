@@ -730,32 +730,38 @@ async function handleGenerate(req, res) {
 
   if (!rooms.length) return sendJson(res, 400, { error: "No analyzed rooms supplied." });
 
+  const prevStatus = job?.status || "PAYMENT_VERIFIED";
   if (job) await saveJob({ ...job, status: "GENERATING" });
 
-  const generated = [];
-  for (const room of rooms) {
-    const roomImages = [];
-    const sourcePath = room.sourcePath || path.join(uploadsDir, `missing_${room.id}.jpg`);
-    const prompt =
-      room.finalPrompt ||
-      room.suggestedPrompt ||
-      `Stage this ${room.room} for a premium real estate listing. Preserve geometry and natural light.`;
-    for (let variant = 1; variant <= variantsPerRoom; variant += 1) {
-      roomImages.push(await generateVariant(room, sourcePath, prompt, variant));
-    }
-    generated.push({ roomId: room.id, images: roomImages });
-  }
-
-  if (job) {
-    const newMap = Object.fromEntries(generated.map(item => [item.roomId, item.images]));
-    const mergedGenerated = { ...(job.generated || {}) };
+  try {
+    const generated = [];
     for (const room of rooms) {
-      mergedGenerated[room.id] = [...(mergedGenerated[room.id] || []), ...(newMap[room.id] || [])];
+      const roomImages = [];
+      const sourcePath = room.sourcePath || path.join(uploadsDir, `missing_${room.id}.jpg`);
+      const prompt =
+        room.finalPrompt ||
+        room.suggestedPrompt ||
+        `Stage this ${room.room} for a premium real estate listing. Preserve geometry and natural light.`;
+      for (let variant = 1; variant <= variantsPerRoom; variant += 1) {
+        roomImages.push(await generateVariant(room, sourcePath, prompt, variant));
+      }
+      generated.push({ roomId: room.id, images: roomImages });
     }
-    job = await saveJob({ ...job, status: "AWAITING_CURATION", generated: mergedGenerated });
-  }
 
-  sendJson(res, 200, { generated, job: job ? publicJob(job) : null });
+    if (job) {
+      const newMap = Object.fromEntries(generated.map(item => [item.roomId, item.images]));
+      const mergedGenerated = { ...(job.generated || {}) };
+      for (const room of rooms) {
+        mergedGenerated[room.id] = [...(mergedGenerated[room.id] || []), ...(newMap[room.id] || [])];
+      }
+      job = await saveJob({ ...job, status: "AWAITING_CURATION", generated: mergedGenerated });
+    }
+
+    sendJson(res, 200, { generated, job: job ? publicJob(job) : null });
+  } catch (error) {
+    if (job) await saveJob({ ...job, status: prevStatus });
+    throw error;
+  }
 }
 
 async function handleCompile(req, res) {
@@ -853,6 +859,9 @@ async function handleJobAction(req, res) {
   if (body.action === "awaiting_curation") job.status = "AWAITING_CURATION";
   if (body.action === "rerun") job.status = "PAYMENT_VERIFIED";
   if (body.action === "complete") job.status = "COMPLETE";
+  if (body.action === "simulate_agent_response") job.status = "AGENT_RESPONDED";
+  if (body.action === "force_payment_verified") job.status = "PAYMENT_VERIFIED";
+  if (body.action === "reset_generating") job.status = "PAYMENT_VERIFIED";
 
   await saveJob(job);
   sendJson(res, 200, { job: publicJob(job) });
@@ -991,13 +1000,34 @@ async function handleGoogleCallback(req, res) {
   res.end("<h1>Google Drive connected</h1><p>You can return to StageMyHome and compile the delivery.</p>");
 }
 
+async function handleJobUpdate(req, res) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+  const job = await loadJob(body.jobId);
+  if (!job) return sendJson(res, 404, { error: "Job not found." });
+
+  if (typeof body.status === "string") job.status = body.status;
+  if (typeof body.agentNotes === "string") job.agentNotes = body.agentNotes;
+  if (typeof body.projectName === "string") job.projectName = body.projectName;
+  if (Array.isArray(body.rooms)) {
+    job.rooms = body.rooms.map((patch, i) => {
+      const existing = job.rooms[i] || {};
+      return { ...existing, ...patch };
+    });
+  }
+
+  await saveJob(job);
+  sendJson(res, 200, { job: publicJob(job) });
+}
+
 async function handleSeedDemo(_req, res) {
   const PLACEHOLDER = "https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=800&q=80";
   const PLACEHOLDER2 = "https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?w=800&q=80";
   const PLACEHOLDER3 = "https://images.unsplash.com/photo-1484154218962-a197022b5858?w=800&q=80";
   const PLACEHOLDER4 = "https://images.unsplash.com/photo-1502005229762-cf1b2da7c5d6?w=800&q=80";
 
-  const makeRoom = (index, room, condition, features) => ({
+  const makeRoom = (index, room, condition, features, agentNumber = "", projectName = "") => ({
     id: crypto.randomUUID(),
     index,
     room,
@@ -1009,63 +1039,85 @@ async function handleSeedDemo(_req, res) {
     sourceUrl: [PLACEHOLDER, PLACEHOLDER2, PLACEHOLDER3, PLACEHOLDER4][index % 4],
     sourcePath: "",
     sourceMime: "image/jpeg",
-    agentNumber: "",
-    projectName: ""
+    agentNumber,
+    projectName
   });
 
-  // Job A — Bishan HDB, awaiting curation with mock generated images
-  const roomsA = [
-    makeRoom(1, "Living Room", "lived-in", ["parquet flooring", "bay windows", "feature wall"]),
-    makeRoom(2, "Master Bedroom", "messy", ["built-in wardrobe", "attached bathroom"]),
-    makeRoom(3, "Kitchen", "neat", ["open concept", "quartz countertop", "island"])
+  // Job 1 — Bedroom, lived-in (from the WhatsApp user, payment verified, ready to generate)
+  const phone1 = "154606105526520";
+  const roomsJob1 = [
+    makeRoom(1, "Bedroom", "lived-in", ["built-in wardrobe", "window with natural light", "parquet flooring"], phone1, "Bedroom - Lived In")
   ];
-  const genA = {};
-  for (const r of roomsA) {
-    genA[r.id] = [
-      { id: crypto.randomUUID(), variant: 1, url: PLACEHOLDER3 },
-      { id: crypto.randomUUID(), variant: 2, url: PLACEHOLDER4 }
-    ];
-  }
-  const jobA = await saveJob({
+  const job1 = await saveJob({
     id: crypto.randomUUID(),
-    agentNumber: "6591112222",
-    projectName: "Bishan HDB 4-room",
-    rooms: roomsA.map(r => ({ ...r, agentNumber: "6591112222", projectName: "Bishan HDB 4-room" })),
-    status: "AWAITING_CURATION",
-    generated: genA,
+    agentNumber: phone1,
+    projectName: "Bedroom - Lived In",
+    rooms: roomsJob1,
+    status: "PAYMENT_VERIFIED",
+    generated: {},
     selected: {},
     driveLink: "",
-    agentNotes: "Modern Japandi feel, keep the parquet, remove all clutter",
-    agentJID: "6591112222@s.whatsapp.net",
+    agentNotes: "Please keep the wardrobe, brighten and stage with minimal modern furniture",
+    agentJID: `${phone1}@s.whatsapp.net`,
     pendingWhatsappMessage: "",
-    responseIndex: 3,
+    responseIndex: 1,
     createdAt: new Date(Date.now() - 3600000).toISOString(),
     updatedAt: new Date().toISOString()
   });
 
-  // Job B — Tampines EC, pending payment
-  const roomsB = [
-    makeRoom(1, "Living Room", "empty", ["high ceiling", "floor-to-ceiling windows"]),
-    makeRoom(2, "Dining Room", "empty", ["open plan", "balcony access"])
+  // Job 2 — Bedroom / storage room, cluttered (same phone, payment verified)
+  const roomsJob2 = [
+    makeRoom(1, "Bedroom / Storage Room", "cluttered", ["window", "concrete flooring", "exposed shelving"], phone1, "Bedroom Storage Room")
   ];
-  const jobB = await saveJob({
+  const job2 = await saveJob({
     id: crypto.randomUUID(),
-    agentNumber: "6583334444",
-    projectName: "Tampines EC Show Unit",
-    rooms: roomsB.map(r => ({ ...r, agentNumber: "6583334444", projectName: "Tampines EC Show Unit" })),
-    status: "PENDING_PAYMENT",
+    agentNumber: phone1,
+    projectName: "Bedroom Storage Room",
+    rooms: roomsJob2,
+    status: "PAYMENT_VERIFIED",
     generated: {},
     selected: {},
     driveLink: "",
-    agentNotes: "",
-    agentJID: "6583334444@s.whatsapp.net",
+    agentNotes: "Transform into a clean guest bedroom or study nook — remove all storage clutter",
+    agentJID: `${phone1}@s.whatsapp.net`,
     pendingWhatsappMessage: "",
-    responseIndex: 0,
+    responseIndex: 1,
+    createdAt: new Date(Date.now() - 1800000).toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+
+  // Job 3 — Bishan HDB, awaiting curation with mock generated images (different phone for grouping demo)
+  const phone2 = "6591112222";
+  const roomsJob3 = [
+    makeRoom(1, "Living Room", "lived-in", ["parquet flooring", "bay windows", "feature wall"], phone2, "Bishan HDB 4-room"),
+    makeRoom(2, "Master Bedroom", "messy", ["built-in wardrobe", "attached bathroom"], phone2, "Bishan HDB 4-room"),
+    makeRoom(3, "Kitchen", "neat", ["open concept", "quartz countertop", "island"], phone2, "Bishan HDB 4-room")
+  ];
+  const genJob3 = {};
+  for (const r of roomsJob3) {
+    genJob3[r.id] = [
+      { id: crypto.randomUUID(), variant: 1, url: PLACEHOLDER3 },
+      { id: crypto.randomUUID(), variant: 2, url: PLACEHOLDER4 }
+    ];
+  }
+  const job3 = await saveJob({
+    id: crypto.randomUUID(),
+    agentNumber: phone2,
+    projectName: "Bishan HDB 4-room",
+    rooms: roomsJob3,
+    status: "AWAITING_CURATION",
+    generated: genJob3,
+    selected: {},
+    driveLink: "",
+    agentNotes: "Modern Japandi feel, keep the parquet, remove all clutter",
+    agentJID: `${phone2}@s.whatsapp.net`,
+    pendingWhatsappMessage: "",
+    responseIndex: 3,
     createdAt: new Date(Date.now() - 7200000).toISOString(),
     updatedAt: new Date().toISOString()
   });
 
-  sendJson(res, 200, { seeded: [publicJob(jobA), publicJob(jobB)] });
+  sendJson(res, 200, { seeded: [publicJob(job1), publicJob(job2), publicJob(job3)] });
 }
 
 async function serveStatic(req, res) {
@@ -1136,6 +1188,7 @@ export async function handleRequest(req, res) {
     if (req.method === "GET" && req.url === "/oauth/google/start") return handleGoogleStart(req, res);
     if (req.method === "GET" && req.url.startsWith("/oauth/google/callback")) return await handleGoogleCallback(req, res);
     if (req.method === "POST" && req.url === "/api/seed-demo") return await handleSeedDemo(req, res);
+    if (req.method === "POST" && req.url === "/api/job-update") return await handleJobUpdate(req, res);
     if (req.method === "POST" && req.url === "/api/analyze") return await handleAnalyze(req, res);
     if (req.method === "POST" && req.url === "/api/generate") return await handleGenerate(req, res);
     if (req.method === "POST" && req.url === "/api/compile") return await handleCompile(req, res);

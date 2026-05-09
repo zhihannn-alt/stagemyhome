@@ -113,7 +113,7 @@ button, input, textarea, select { font: inherit; }
 .panel-body { padding: 14px; }
 
 /* ── Job list ── */
-.job-list { display: flex; flex-direction: column; gap: 1px; padding: 0; }
+.job-list { display: flex; flex-direction: column; gap: 0; padding: 0; }
 
 .job-row {
   width: 100%;
@@ -126,15 +126,39 @@ button, input, textarea, select { font: inherit; }
   border: 0;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
-  padding: 12px 16px;
+  padding: 10px 16px;
   cursor: pointer;
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .job-row:hover { background: var(--soft); }
 .job-row.selected { background: #effaf5; border-left: 3px solid var(--brand); padding-left: 13px; }
 .job-row span { color: var(--muted); font-size: 12px; font-weight: 500; }
+
+/* ── Phone groups ── */
+.phone-group { display: flex; flex-direction: column; }
+.phone-group-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--soft);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  text-align: left;
+  color: var(--ink);
+}
+.phone-group-header:hover { background: #e3ede9; }
+.phone-group.has-active .phone-group-header { background: #dff0e8; }
+.phone-label { font-size: 12px; font-weight: 700; flex: 1; color: var(--brand-dark); }
+.phone-count { font-size: 11px; color: var(--muted); }
+.phone-chevron { font-size: 10px; color: var(--muted); margin-left: 4px; }
+.phone-group-jobs { display: flex; flex-direction: column; }
+.phone-group-jobs .job-row { padding-left: 24px; }
+.phone-group-jobs .job-row.selected { padding-left: 21px; }
 
 .job-status-badge {
   display: inline-block;

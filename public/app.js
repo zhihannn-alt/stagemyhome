@@ -4,7 +4,8 @@ const state = {
   config: { watchPhone: "", bridgeURL: "http://localhost:8080", hasOpenAIKey: false },
   busy: false,
   error: "",
-  selected: {}
+  selected: {},
+  collapsedGroups: {}
 };
 
 const $ = selector => document.querySelector(selector);
@@ -156,6 +157,9 @@ function renderActionBar() {
     case "AWAITING_RESPONSES":
       return `<div class="action-bar waiting">
         <span class="action-hint">⏳ Waiting for agent to reply via WhatsApp</span>
+        <button class="action-btn-secondary" id="simulate-response" ${busy ? "disabled" : ""}>
+          Simulate agent response
+        </button>
       </div>`;
 
     case "AGENT_RESPONDED":
@@ -185,6 +189,9 @@ function renderActionBar() {
     case "GENERATING":
       return `<div class="action-bar waiting">
         <span class="action-hint">⚙️ Generating images… this may take a minute</span>
+        <button class="action-btn-secondary" id="reset-generating" ${busy ? "disabled" : ""}>
+          Reset (stuck?)
+        </button>
       </div>`;
 
     case "AWAITING_CURATION": {
@@ -248,6 +255,66 @@ function renderRoomCard(room) {
   </div>`;
 }
 
+// ── Grouped sidebar ───────────────────────────────────────
+
+function groupJobsByPhone(jobs) {
+  const order = [];
+  const groups = {};
+  for (const job of jobs) {
+    const phone = job.agentNumber || "unknown";
+    if (!groups[phone]) {
+      groups[phone] = [];
+      order.push(phone);
+    }
+    groups[phone].push(job);
+  }
+  return { order, groups };
+}
+
+function formatPhone(phone) {
+  if (!phone || phone === "unknown") return "Unknown";
+  const digits = String(phone).replace(/\D/g, "");
+  if (digits.length >= 11 && digits.startsWith("65")) return `+65 ${digits.slice(2, 6)} ${digits.slice(6)}`;
+  if (digits.length >= 10 && digits.startsWith("1")) return `+1 ${digits.slice(1, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
+  if (digits.length >= 8) return `${digits.slice(0, 4)} ${digits.slice(4)}`;
+  return phone;
+}
+
+function renderSidebar() {
+  if (!state.jobs.length) {
+    return `<div class="empty">Waiting for WhatsApp messages.</div>`;
+  }
+
+  const { order, groups } = groupJobsByPhone(state.jobs);
+
+  if (order.length === 1) {
+    return groups[order[0]].map(j => renderJobRow(j)).join("");
+  }
+
+  return order.map(phone => {
+    const groupJobs = groups[phone];
+    const collapsed = state.collapsedGroups[phone];
+    const hasActive = groupJobs.some(j => j.id === state.activeJob?.id);
+    return `
+      <div class="phone-group ${hasActive ? "has-active" : ""}">
+        <button class="phone-group-header" data-phone="${escapeHtml(phone)}">
+          <span class="phone-label">${escapeHtml(formatPhone(phone))}</span>
+          <span class="phone-count">${groupJobs.length} project${groupJobs.length !== 1 ? "s" : ""}</span>
+          <span class="phone-chevron">${collapsed ? "▶" : "▼"}</span>
+        </button>
+        ${collapsed ? "" : `<div class="phone-group-jobs">${groupJobs.map(j => renderJobRow(j)).join("")}</div>`}
+      </div>
+    `;
+  }).join("");
+}
+
+function renderJobRow(j) {
+  return `<button class="job-row ${state.activeJob?.id === j.id ? "selected" : ""}" data-job="${j.id}">
+    <strong>${escapeHtml(j.projectName || "WhatsApp Project")}</strong>
+    <span class="job-status-badge ${j.status === "COMPLETE" ? "done" : ""}">${escapeHtml(statusLabel(j.status))}</span>
+  </button>`;
+}
+
 // ── Main render ───────────────────────────────────────────
 
 function renderApp() {
@@ -275,13 +342,7 @@ function renderApp() {
             <button class="seed-btn" id="seed-demo">+ Demo data</button>
           </div>
           <div class="panel-body job-list">
-            ${state.jobs.length ? state.jobs.map(j => `
-              <button class="job-row ${state.activeJob?.id === j.id ? "selected" : ""}" data-job="${j.id}">
-                <strong>${escapeHtml(j.projectName || "WhatsApp Project")}</strong>
-                <span>${escapeHtml(j.agentNumber)}</span>
-                <span class="job-status-badge ${j.status === "COMPLETE" ? "done" : ""}">${escapeHtml(statusLabel(j.status))}</span>
-              </button>
-            `).join("") : `<div class="empty">Waiting for WhatsApp messages.</div>`}
+            ${renderSidebar()}
           </div>
         </aside>
 
@@ -290,7 +351,7 @@ function renderApp() {
             <div class="project-header">
               <div>
                 <h2>${escapeHtml(job.projectName)}</h2>
-                <p class="subtle">${escapeHtml(job.agentNumber)} · ${job.rooms?.length || 0} rooms</p>
+                <p class="subtle">${escapeHtml(formatPhone(job.agentNumber))} · ${job.rooms?.length || 0} rooms</p>
               </div>
             </div>
 
@@ -323,6 +384,13 @@ function bindEvents() {
       render();
     });
   });
+  document.querySelectorAll(".phone-group-header").forEach(button => {
+    button.addEventListener("click", () => {
+      const phone = button.dataset.phone;
+      state.collapsedGroups[phone] = !state.collapsedGroups[phone];
+      render();
+    });
+  });
   $("#seed-demo")?.addEventListener("click", async () => {
     await fetch("/api/seed-demo", { method: "POST" });
     await refreshJobs();
@@ -330,6 +398,8 @@ function bindEvents() {
   });
   $("#agent-confirmed")?.addEventListener("click", () => jobAction("agent_confirmed"));
   $("#verify-payment")?.addEventListener("click", () => jobAction("verify_payment"));
+  $("#simulate-response")?.addEventListener("click", () => jobAction("simulate_agent_response"));
+  $("#reset-generating")?.addEventListener("click", () => jobAction("reset_generating"));
   $("#generate")?.addEventListener("click", generateImages);
   $("#finalise")?.addEventListener("click", finaliseDelivery);
   document.querySelectorAll(".variant").forEach(button => {
