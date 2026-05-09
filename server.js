@@ -791,7 +791,13 @@ async function handlePendingMessages(_req, res) {
   const list = await loadAllJobs();
   const pending = list
     .filter(job => job.pendingWhatsappMessage && job.agentJID)
-    .map(job => ({ jobId: job.id, replyJID: job.agentJID, message: job.pendingWhatsappMessage }));
+    .map(job => {
+      const images = Object.entries(job.selected || {}).map(([roomId, img]) => {
+        const room = (job.rooms || []).find(r => r.id === roomId);
+        return { url: img?.url, room: room?.room || "Room" };
+      }).filter(item => item.url);
+      return { jobId: job.id, replyJID: job.agentJID, message: job.pendingWhatsappMessage, images };
+    });
   for (const item of pending) {
     const job = await loadJob(item.jobId);
     if (job) await saveJob({ ...job, pendingWhatsappMessage: "" });
