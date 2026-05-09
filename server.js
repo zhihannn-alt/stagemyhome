@@ -16,8 +16,9 @@ await loadDotEnv(path.join(__dirname, ".env"));
 
 const PORT = Number(process.env.PORT || 5173);
 let openAIKey = process.env.OPENAI_API_KEY || "";
+let openAIImageKey = process.env.OPENAI_IMAGE_API_KEY || "";
 let analysisModel = process.env.OPENAI_ANALYSIS_MODEL || "gpt-5.5";
-let imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
+let imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
 let googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 let googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
 let googleRedirectUri = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${PORT}/oauth/google/callback`;
@@ -637,7 +638,8 @@ async function handleWhatsAppText(req, res) {
 async function generateVariant(room, sourcePath, prompt, variant) {
   await ensureLocalFile(sourcePath, room.sourceUrl);
 
-  if (!openAIKey) {
+  const activeImageKey = openAIImageKey || openAIKey;
+  if (!activeImageKey) {
     return {
       id: crypto.randomUUID(),
       variant,
@@ -659,7 +661,7 @@ async function generateVariant(room, sourcePath, prompt, variant) {
 
   const response = await fetch("https://api.openai.com/v1/images/edits", {
     method: "POST",
-    headers: { authorization: `Bearer ${openAIKey}` },
+    headers: { authorization: `Bearer ${activeImageKey}` },
     body: form
   });
 
