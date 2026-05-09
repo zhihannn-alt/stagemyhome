@@ -757,6 +757,7 @@ async function handleCompile(req, res) {
     ? await uploadSelectionToDrive(folderName, selected, body.rooms || [])
     : `${appUrl}/delivery/${job?.id || safeName(folderName)}`;
   const whatsappMessage = `Your StageMyHome images are ready! Download here: ${deliveryLink}\n\n${count} rooms, staged for your listing. Let us know if you'd like adjustments.`;
+  console.log(`[compile] jobId=${job?.id} agentJID=${job?.agentJID || "(empty)"} agentNumber=${agentNumber}`);
   if (job) {
     await saveJob({
       ...job,
@@ -765,6 +766,7 @@ async function handleCompile(req, res) {
       driveLink: deliveryLink,
       pendingWhatsappMessage: job.agentJID ? whatsappMessage : ""
     });
+    console.log(`[compile] pendingWhatsappMessage queued: ${Boolean(job.agentJID)}`);
   }
 
   sendJson(res, 200, {
@@ -789,6 +791,7 @@ async function sendViaWhatsApp(agentNumber, message) {
 
 async function handlePendingMessages(_req, res) {
   const list = await loadAllJobs();
+  console.log(`[pending-messages] ${list.length} jobs, ${list.filter(j => j.pendingWhatsappMessage).length} with pending msg, ${list.filter(j => j.agentJID).length} with agentJID`);
   const pending = list
     .filter(job => job.pendingWhatsappMessage && job.agentJID)
     .map(job => {
