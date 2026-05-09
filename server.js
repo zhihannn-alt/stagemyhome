@@ -582,6 +582,11 @@ async function handleWhatsAppInbound(req, res) {
   if (!photos.length) return sendJson(res, 400, { error: "photos array is required." });
   if (!isWatchedPhone(agentNumber)) return sendJson(res, 200, { ignored: true, nextMessage: "" });
 
+  // Batch into existing open job for this sender instead of creating a new one
+  let existingJob = await findOpenJobForSender(agentNumber);
+  const startIndex = existingJob ? existingJob.rooms.length : 0;
+  const isNewJob = !existingJob;
+
   const rooms = [];
   for (let i = 0; i < photos.length; i += 1) {
     const photo = photos[i];
@@ -591,9 +596,10 @@ async function handleWhatsAppInbound(req, res) {
     const mime = photo.mime || "image/jpeg";
     const file = new File([bytes], fileName, { type: mime });
     const saved = await saveUpload(file, "whatsapp", agentNumber, projectName);
-    const room = await analyzeRoom(file, i + 1, recommendedPrompt, roomHints[i] || "");
+    const room = await analyzeRoom(file, startIndex + i + 1, recommendedPrompt, roomHints[i] || "");
     rooms.push({
       ...room,
+      index: startIndex + i + 1,
       agentNumber,
       projectName,
       sourceUrl: saved.url,
@@ -602,12 +608,21 @@ async function handleWhatsAppInbound(req, res) {
     });
   }
 
-  const job = await createJob({ agentNumber, projectName, rooms, status: "AWAITING_RESPONSES", agentJID: replyJID });
-  sendJson(res, 200, {
-    job: publicJob(job),
-    rooms,
-    nextMessage: roomQuestionMessage(rooms[0], 1, rooms.length)
-  });
+  let job;
+  let nextMessage;
+  if (isNewJob) {
+    job = await createJob({ agentNumber, projectName, rooms, status: "AWAITING_RESPONSES", agentJID: replyJID });
+    // First photo — send room 1 questions so agent knows what to reply with
+    nextMessage = roomQuestionMessage(rooms[0], 1, 1) +
+      "\n\nSend more photos while you think, or reply now.";
+  } else {
+    const newRooms = [...existingJob.rooms, ...rooms];
+    job = await saveJob({ ...existingJob, rooms: newRooms, agentJID: existingJob.agentJID || replyJID });
+    const latest = rooms[0];
+    nextMessage = `Got photo ${job.rooms.length} (${latest.room}). Send more photos, or reply when done — I'll ask about each room.`;
+  }
+
+  sendJson(res, 200, { job: publicJob(job), rooms, nextMessage });
 }
 
 async function handleWhatsAppText(req, res) {
@@ -976,6 +991,83 @@ async function handleGoogleCallback(req, res) {
   res.end("<h1>Google Drive connected</h1><p>You can return to StageMyHome and compile the delivery.</p>");
 }
 
+async function handleSeedDemo(_req, res) {
+  const PLACEHOLDER = "https://images.unsplash.com/photo-1556909114-f6e7ad7d3136?w=800&q=80";
+  const PLACEHOLDER2 = "https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?w=800&q=80";
+  const PLACEHOLDER3 = "https://images.unsplash.com/photo-1484154218962-a197022b5858?w=800&q=80";
+  const PLACEHOLDER4 = "https://images.unsplash.com/photo-1502005229762-cf1b2da7c5d6?w=800&q=80";
+
+  const makeRoom = (index, room, condition, features) => ({
+    id: crypto.randomUUID(),
+    index,
+    room,
+    condition,
+    features,
+    questions: roomQuestions(room, condition),
+    suggestedPrompt: buildStagingPrompt(room, features, ""),
+    finalPrompt: null,
+    sourceUrl: [PLACEHOLDER, PLACEHOLDER2, PLACEHOLDER3, PLACEHOLDER4][index % 4],
+    sourcePath: "",
+    sourceMime: "image/jpeg",
+    agentNumber: "",
+    projectName: ""
+  });
+
+  // Job A — Bishan HDB, awaiting curation with mock generated images
+  const roomsA = [
+    makeRoom(1, "Living Room", "lived-in", ["parquet flooring", "bay windows", "feature wall"]),
+    makeRoom(2, "Master Bedroom", "messy", ["built-in wardrobe", "attached bathroom"]),
+    makeRoom(3, "Kitchen", "neat", ["open concept", "quartz countertop", "island"])
+  ];
+  const genA = {};
+  for (const r of roomsA) {
+    genA[r.id] = [
+      { id: crypto.randomUUID(), variant: 1, url: PLACEHOLDER3 },
+      { id: crypto.randomUUID(), variant: 2, url: PLACEHOLDER4 }
+    ];
+  }
+  const jobA = await saveJob({
+    id: crypto.randomUUID(),
+    agentNumber: "6591112222",
+    projectName: "Bishan HDB 4-room",
+    rooms: roomsA.map(r => ({ ...r, agentNumber: "6591112222", projectName: "Bishan HDB 4-room" })),
+    status: "AWAITING_CURATION",
+    generated: genA,
+    selected: {},
+    driveLink: "",
+    agentNotes: "Modern Japandi feel, keep the parquet, remove all clutter",
+    agentJID: "6591112222@s.whatsapp.net",
+    pendingWhatsappMessage: "",
+    responseIndex: 3,
+    createdAt: new Date(Date.now() - 3600000).toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+
+  // Job B — Tampines EC, pending payment
+  const roomsB = [
+    makeRoom(1, "Living Room", "empty", ["high ceiling", "floor-to-ceiling windows"]),
+    makeRoom(2, "Dining Room", "empty", ["open plan", "balcony access"])
+  ];
+  const jobB = await saveJob({
+    id: crypto.randomUUID(),
+    agentNumber: "6583334444",
+    projectName: "Tampines EC Show Unit",
+    rooms: roomsB.map(r => ({ ...r, agentNumber: "6583334444", projectName: "Tampines EC Show Unit" })),
+    status: "PENDING_PAYMENT",
+    generated: {},
+    selected: {},
+    driveLink: "",
+    agentNotes: "",
+    agentJID: "6583334444@s.whatsapp.net",
+    pendingWhatsappMessage: "",
+    responseIndex: 0,
+    createdAt: new Date(Date.now() - 7200000).toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+
+  sendJson(res, 200, { seeded: [publicJob(jobA), publicJob(jobB)] });
+}
+
 async function serveStatic(req, res) {
   const url = new URL(req.url, "http://localhost");
   if (url.pathname.startsWith("/delivery/")) return await serveDelivery(url.pathname.split("/").pop(), res);
@@ -1043,6 +1135,7 @@ export async function handleRequest(req, res) {
     if (req.method === "POST" && req.url === "/api/whatsapp/text") return await handleWhatsAppText(req, res);
     if (req.method === "GET" && req.url === "/oauth/google/start") return handleGoogleStart(req, res);
     if (req.method === "GET" && req.url.startsWith("/oauth/google/callback")) return await handleGoogleCallback(req, res);
+    if (req.method === "POST" && req.url === "/api/seed-demo") return await handleSeedDemo(req, res);
     if (req.method === "POST" && req.url === "/api/analyze") return await handleAnalyze(req, res);
     if (req.method === "POST" && req.url === "/api/generate") return await handleGenerate(req, res);
     if (req.method === "POST" && req.url === "/api/compile") return await handleCompile(req, res);
