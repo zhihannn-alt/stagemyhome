@@ -105,6 +105,7 @@ function publicJob(job) {
     driveLink: job.driveLink || "",
     agentNotes: job.agentNotes || "",
     agentJID: job.agentJID || "",
+    responseIndex: job.responseIndex || 0,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt
   };
@@ -122,6 +123,7 @@ function dbToJob(row, rooms) {
     agentNotes: row.agent_notes || "",
     agentJID: row.reply_jid || "",
     pendingWhatsappMessage: row.pending_whatsapp_message || "",
+    responseIndex: row.response_index || 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     rooms: (rooms || []).map(r => ({
@@ -191,6 +193,7 @@ async function saveJob(job) {
       agent_notes: job.agentNotes || null,
       reply_jid: job.agentJID || null,
       pending_whatsapp_message: job.pendingWhatsappMessage || null,
+      response_index: job.responseIndex || 0,
       created_at: job.createdAt,
       updated_at: job.updatedAt
     });
@@ -220,7 +223,7 @@ async function saveJob(job) {
   return job;
 }
 
-async function createJob({ agentNumber, projectName, rooms, status = "AWAITING_RESPONSES" }) {
+async function createJob({ agentNumber, projectName, rooms, status = "AWAITING_RESPONSES", agentJID = "" }) {
   return saveJob({
     id: crypto.randomUUID(),
     agentNumber,
@@ -231,8 +234,9 @@ async function createJob({ agentNumber, projectName, rooms, status = "AWAITING_R
     selected: {},
     driveLink: "",
     agentNotes: "",
-    agentJID: "",
+    agentJID,
     pendingWhatsappMessage: "",
+    responseIndex: 0,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
@@ -609,20 +613,34 @@ async function handleWhatsAppText(req, res) {
   const text = String(body.text || "").trim();
   if (!agentNumber || !isWatchedPhone(agentNumber)) return sendJson(res, 200, { ignored: true, reply: "" });
 
-  // Link text reply to the most recent open job for this sender
+  // Link text reply to the most recent open job for this sender, room by room in order
   if (text) {
     const openJob = await findOpenJobForSender(agentNumber);
     if (openJob) {
-      const updatedRooms = openJob.rooms.map(room => ({
-        ...room,
-        suggestedPrompt: buildStagingPrompt(room.room, room.features, text)
-      }));
-      await saveJob({ ...openJob, rooms: updatedRooms, agentNotes: text, status: "AGENT_RESPONDED" });
-      const roomList = openJob.rooms.map(r => r.room).join(", ");
-      sendJson(res, 200, {
-        reply: `Got it! I’ve noted your preferences for: ${roomList}. Your operator will review and generate the staged images shortly.`
-      });
-      return;
+      const idx = openJob.responseIndex || 0;
+      const targetRoom = openJob.rooms[idx];
+      if (targetRoom) {
+        const updatedRooms = openJob.rooms.map((room, i) =>
+          i === idx ? { ...room, suggestedPrompt: buildStagingPrompt(room.room, room.features, text) } : room
+        );
+        const nextIdx = idx + 1;
+        const allDone = nextIdx >= openJob.rooms.length;
+        const notesEntry = `${targetRoom.room}: ${text}`;
+        await saveJob({
+          ...openJob,
+          rooms: updatedRooms,
+          agentNotes: openJob.agentNotes ? `${openJob.agentNotes} | ${notesEntry}` : notesEntry,
+          responseIndex: nextIdx,
+          status: allDone ? "AGENT_RESPONDED" : "AWAITING_RESPONSES"
+        });
+        if (allDone) {
+          sendJson(res, 200, { reply: `All noted! Your operator will review and generate the staged images shortly.` });
+        } else {
+          const nextRoom = openJob.rooms[nextIdx];
+          sendJson(res, 200, { reply: `Got it for the ${targetRoom.room}! Now share your preferences for the ${nextRoom.room}.` });
+        }
+        return;
+      }
     }
   }
 
@@ -656,7 +674,6 @@ async function generateVariant(room, sourcePath, prompt, variant) {
   form.append("n", "1");
   form.append("size", "1536x1024");
   form.append("quality", "high");
-  form.append("input_fidelity", "high");
   form.append("output_format", "jpeg");
 
   const response = await fetch("https://api.openai.com/v1/images/edits", {
