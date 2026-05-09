@@ -17,7 +17,7 @@ await loadDotEnv(path.join(__dirname, ".env"));
 const PORT = Number(process.env.PORT || 5173);
 let openAIKey = process.env.OPENAI_API_KEY || "";
 let analysisModel = process.env.OPENAI_ANALYSIS_MODEL || "gpt-5.5";
-let imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
+let imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
 let googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 let googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
 let googleRedirectUri = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${PORT}/oauth/google/callback`;
