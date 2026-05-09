@@ -8,6 +8,8 @@ create table if not exists public.jobs (
   status text not null default 'AWAITING_RESPONSES',
   payment_amount integer not null default 39,
   delivery_link text,
+  generated_data jsonb not null default '{}'::jsonb,
+  selected_data jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -24,6 +26,7 @@ create table if not exists public.rooms (
   final_prompt text,
   source_path text,
   source_url text,
+  source_mime text not null default 'image/jpeg',
   created_at timestamptz not null default now()
 );
 

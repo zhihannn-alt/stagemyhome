@@ -170,7 +170,7 @@ function renderGenerated() {
 
 function renderTimeline() {
   const status = state.activeJob?.status || "WAITING_FOR_WHATSAPP";
-  const steps = ["AWAITING_RESPONSES", "PENDING_PAYMENT", "PAYMENT_VERIFIED", "GENERATING", "AWAITING_CURATION", "COMPLETE"];
+  const steps = ["AWAITING_RESPONSES", "AGENT_RESPONDED", "PENDING_PAYMENT", "PAYMENT_VERIFIED", "GENERATING", "AWAITING_CURATION", "COMPLETE"];
   return steps.map(step => `<span class="flow-step ${status === step ? "active" : ""}">${escapeHtml(statusLabel(step))}</span>`).join("");
 }
 
@@ -220,6 +220,7 @@ function renderApp() {
             <div class="panel-body">
               <div class="flow">${renderTimeline()}</div>
               ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ""}
+              ${job?.agentNotes ? `<p class="note"><strong>Agent preference:</strong> ${escapeHtml(job.agentNotes)}</p>` : ""}
               ${job?.driveLink ? `<p class="note">Delivery link: <a href="${job.driveLink}" target="_blank">${escapeHtml(job.driveLink)}</a></p>` : ""}
             </div>
           </section>

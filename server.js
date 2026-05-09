@@ -4,6 +4,7 @@ import { createReadStream, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { createClient } from "@supabase/supabase-js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
@@ -15,14 +16,21 @@ await loadDotEnv(path.join(__dirname, ".env"));
 
 const PORT = Number(process.env.PORT || 5173);
 let openAIKey = process.env.OPENAI_API_KEY || "";
-let analysisModel = process.env.OPENAI_ANALYSIS_MODEL || "gpt-5.1";
-let imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1.5";
+let analysisModel = process.env.OPENAI_ANALYSIS_MODEL || "gpt-5.5";
+let imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
 let googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 let googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
 let googleRedirectUri = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${PORT}/oauth/google/callback`;
 let googleTokens = null;
 let watchPhone = process.env.DEMO_WATCH_PHONE || "";
 let bridgeURL = process.env.WHATSAPP_BRIDGE_URL || "http://localhost:8080";
+
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+if (!supabase) console.warn("Supabase not configured — jobs stored in memory only (lost on restart).");
+
+// In-memory fallback used when Supabase is not configured.
 const jobs = new Map();
 
 const mimeByExt = {
@@ -89,20 +97,121 @@ function publicJob(job) {
     generated: job.generated || {},
     selected: job.selected || {},
     driveLink: job.driveLink || "",
+    agentNotes: job.agentNotes || "",
     createdAt: job.createdAt,
     updatedAt: job.updatedAt
   };
 }
 
-function saveJob(job) {
+function dbToJob(row, rooms) {
+  return {
+    id: row.id,
+    agentNumber: row.agent_number,
+    projectName: row.project_name,
+    status: row.status,
+    driveLink: row.delivery_link || "",
+    generated: row.generated_data || {},
+    selected: row.selected_data || {},
+    agentNotes: row.agent_notes || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    rooms: (rooms || []).map(r => ({
+      id: r.id,
+      index: r.room_index,
+      room: r.room,
+      condition: r.condition,
+      features: r.features || [],
+      questions: r.questions || [],
+      suggestedPrompt: r.suggested_prompt || "",
+      finalPrompt: r.final_prompt || null,
+      sourceUrl: r.source_url,
+      sourcePath: r.source_path,
+      sourceMime: r.source_mime || "image/jpeg",
+      agentNumber: row.agent_number,
+      projectName: row.project_name
+    }))
+  };
+}
+
+async function loadJob(id) {
+  if (supabase) {
+    const { data: row, error } = await supabase.from("jobs").select("*").eq("id", id).single();
+    if (error || !row) return jobs.get(id) || null;
+    const { data: rooms } = await supabase.from("rooms").select("*").eq("job_id", id).order("room_index");
+    const job = dbToJob(row, rooms || []);
+    jobs.set(id, job);
+    return job;
+  }
+  return jobs.get(id) || null;
+}
+
+async function loadAllJobs() {
+  if (supabase) {
+    const { data: rows, error } = await supabase
+      .from("jobs")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (error || !rows?.length) return [];
+    const ids = rows.map(r => r.id);
+    const { data: allRooms } = await supabase
+      .from("rooms")
+      .select("*")
+      .in("job_id", ids)
+      .order("room_index");
+    return rows.map(row => {
+      const rooms = (allRooms || []).filter(r => r.job_id === row.id);
+      return dbToJob(row, rooms);
+    });
+  }
+  return [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+async function saveJob(job) {
   job.updatedAt = new Date().toISOString();
   jobs.set(job.id, job);
+
+  if (supabase) {
+    const { error: jobErr } = await supabase.from("jobs").upsert({
+      id: job.id,
+      agent_number: job.agentNumber,
+      project_name: job.projectName,
+      status: job.status,
+      delivery_link: job.driveLink || null,
+      generated_data: job.generated || {},
+      selected_data: job.selected || {},
+      agent_notes: job.agentNotes || null,
+      created_at: job.createdAt,
+      updated_at: job.updatedAt
+    });
+    if (jobErr) console.error("Supabase job upsert error:", jobErr.message);
+
+    if (job.rooms?.length) {
+      const { error: roomErr } = await supabase.from("rooms").upsert(
+        job.rooms.map(r => ({
+          id: r.id,
+          job_id: job.id,
+          room_index: r.index,
+          room: r.room,
+          condition: r.condition,
+          features: r.features || [],
+          questions: r.questions || [],
+          suggested_prompt: r.suggestedPrompt || "",
+          final_prompt: r.finalPrompt || null,
+          source_path: r.sourcePath || null,
+          source_url: r.sourceUrl || null,
+          source_mime: r.sourceMime || "image/jpeg"
+        }))
+      );
+      if (roomErr) console.error("Supabase rooms upsert error:", roomErr.message);
+    }
+  }
+
   return job;
 }
 
-function createJob({ agentNumber, projectName, rooms, status = "AWAITING_RESPONSES" }) {
+async function createJob({ agentNumber, projectName, rooms, status = "AWAITING_RESPONSES" }) {
   return saveJob({
-    id: `SMH-${Date.now().toString(36).toUpperCase()}`,
+    id: crypto.randomUUID(),
     agentNumber,
     projectName,
     rooms,
@@ -110,9 +219,51 @@ function createJob({ agentNumber, projectName, rooms, status = "AWAITING_RESPONS
     generated: {},
     selected: {},
     driveLink: "",
+    agentNotes: "",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
+}
+
+async function uploadToStorage(buffer, storagePath, mimeType) {
+  if (!supabase) return null;
+  const bucket = process.env.SUPABASE_STORAGE_BUCKET || "stagemyhome";
+  const { error } = await supabase.storage
+    .from(bucket)
+    .upload(storagePath, buffer, { contentType: mimeType, upsert: true });
+  if (error) {
+    console.error("Supabase storage upload error:", error.message);
+    return null;
+  }
+  const { data } = supabase.storage.from(bucket).getPublicUrl(storagePath);
+  return data.publicUrl;
+}
+
+async function ensureLocalFile(localPath, publicUrl) {
+  if (existsSync(localPath)) return;
+  if (!publicUrl) throw new Error(`Source file missing locally and no storage URL available.`);
+  const res = await fetch(publicUrl);
+  if (!res.ok) throw new Error(`Failed to download source image from storage: ${res.status}`);
+  await mkdir(path.dirname(localPath), { recursive: true });
+  await writeFile(localPath, Buffer.from(await res.arrayBuffer()));
+}
+
+async function findOpenJobForSender(agentNumber) {
+  if (supabase) {
+    const { data } = await supabase
+      .from("jobs")
+      .select("id")
+      .eq("agent_number", agentNumber)
+      .eq("status", "AWAITING_RESPONSES")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (data) return loadJob(data.id);
+  }
+  const matching = [...jobs.values()]
+    .filter(j => j.agentNumber === agentNumber && j.status === "AWAITING_RESPONSES")
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return matching[0] || null;
 }
 
 function safeName(value) {
@@ -346,14 +497,17 @@ async function analyzeRoom(file, index, recommendedPrompt, roomHint) {
 
 async function saveUpload(file, prefix, agentNumber = "", projectName = "") {
   const ext = path.extname(file.name) || ".jpg";
-  const folder = path.join(uploadsDir, normalizePhone(agentNumber), safeSegment(projectName, "default-project"));
+  const subdir = `${normalizePhone(agentNumber)}/${safeSegment(projectName, "default-project")}`;
+  const folder = path.join(uploadsDir, subdir);
   await mkdir(folder, { recursive: true });
   const name = `${prefix}_${crypto.randomUUID()}_${safeName(file.name || `photo${ext}`)}`;
   const target = path.join(folder, name);
-  await writeFile(target, Buffer.from(await file.arrayBuffer()));
+  const buffer = Buffer.from(await file.arrayBuffer());
+  await writeFile(target, buffer);
+  const storageUrl = await uploadToStorage(buffer, `uploads/${subdir}/${name}`, file.type || "image/jpeg");
   return {
     path: target,
-    url: `/uploads/${normalizePhone(agentNumber)}/${safeSegment(projectName, "default-project")}/${name}`
+    url: storageUrl || `/uploads/${subdir}/${name}`
   };
 }
 
@@ -384,7 +538,7 @@ async function handleAnalyze(req, res) {
       sourceMime: files[i].type || "image/jpeg"
     });
   }
-  const job = createJob({ agentNumber, projectName, rooms, status: "AWAITING_RESPONSES" });
+  const job = await createJob({ agentNumber, projectName, rooms, status: "AWAITING_RESPONSES" });
   sendJson(res, 200, { job: publicJob(job), rooms });
 }
 
@@ -422,7 +576,7 @@ async function handleWhatsAppInbound(req, res) {
     });
   }
 
-  const job = createJob({ agentNumber, projectName, rooms, status: "AWAITING_RESPONSES" });
+  const job = await createJob({ agentNumber, projectName, rooms, status: "AWAITING_RESPONSES" });
   sendJson(res, 200, {
     job: publicJob(job),
     rooms,
@@ -438,8 +592,25 @@ async function handleWhatsAppText(req, res) {
   for await (const chunk of req) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
   const agentNumber = String(body.agentNumber || body.phone || "");
-  const text = String(body.text || "");
+  const text = String(body.text || "").trim();
   if (!agentNumber || !isWatchedPhone(agentNumber)) return sendJson(res, 200, { ignored: true, reply: "" });
+
+  // Link text reply to the most recent open job for this sender
+  if (text) {
+    const openJob = await findOpenJobForSender(agentNumber);
+    if (openJob) {
+      const updatedRooms = openJob.rooms.map(room => ({
+        ...room,
+        suggestedPrompt: buildStagingPrompt(room.room, room.features, text)
+      }));
+      await saveJob({ ...openJob, rooms: updatedRooms, agentNotes: text, status: "AGENT_RESPONDED" });
+      const roomList = openJob.rooms.map(r => r.room).join(", ");
+      sendJson(res, 200, {
+        reply: `Got it! I’ve noted your preferences for: ${roomList}. Your operator will review and generate the staged images shortly.`
+      });
+      return;
+    }
+  }
 
   const lower = text.toLowerCase();
   const shouldReply = ["stage", "staging", "property", "listing", "photo", "photos", "room"].some(word => lower.includes(word));
@@ -451,6 +622,8 @@ async function handleWhatsAppText(req, res) {
 }
 
 async function generateVariant(room, sourcePath, prompt, variant) {
+  await ensureLocalFile(sourcePath, room.sourceUrl);
+
   if (!openAIKey) {
     return {
       id: crypto.randomUUID(),
@@ -488,21 +661,23 @@ async function generateVariant(room, sourcePath, prompt, variant) {
 
   const fileName = `generated_${crypto.randomUUID()}_${safeName(room.room)}_${variant}.jpg`;
   const target = path.join(generatedDir, fileName);
-  await writeFile(target, Buffer.from(b64, "base64"));
-  return { id: crypto.randomUUID(), variant, url: `/generated/${fileName}` };
+  const generatedBuffer = Buffer.from(b64, "base64");
+  await writeFile(target, generatedBuffer);
+  const storageUrl = await uploadToStorage(generatedBuffer, `generated/${fileName}`, "image/jpeg");
+  return { id: crypto.randomUUID(), variant, url: storageUrl || `/generated/${fileName}` };
 }
 
 async function handleGenerate(req, res) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-  const job = body.jobId ? jobs.get(body.jobId) : null;
+  let job = body.jobId ? await loadJob(body.jobId) : null;
   const rooms = Array.isArray(body.rooms) ? body.rooms : [];
   const variantsPerRoom = Math.max(1, Math.min(Number(body.variantsPerRoom || 1), 2));
 
   if (!rooms.length) return sendJson(res, 400, { error: "No analyzed rooms supplied." });
 
-  if (job) saveJob({ ...job, status: "GENERATING" });
+  if (job) await saveJob({ ...job, status: "GENERATING" });
 
   const generated = [];
   for (const room of rooms) {
@@ -521,17 +696,17 @@ async function handleGenerate(req, res) {
 
   if (job) {
     const generatedMap = Object.fromEntries(generated.map(item => [item.roomId, item.images]));
-    saveJob({ ...jobs.get(job.id), status: "AWAITING_CURATION", generated: generatedMap });
+    job = await saveJob({ ...job, status: "AWAITING_CURATION", generated: generatedMap });
   }
 
-  sendJson(res, 200, { generated, job: job ? publicJob(jobs.get(job.id)) : null });
+  sendJson(res, 200, { generated, job: job ? publicJob(job) : null });
 }
 
 async function handleCompile(req, res) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-  const job = body.jobId ? jobs.get(body.jobId) : null;
+  const job = body.jobId ? await loadJob(body.jobId) : null;
   const agentNumber = body.agentNumber || "65XXXXXXXX";
   const projectName = body.projectName || "StageMyHome Project";
   const count = Array.isArray(body.selected) ? body.selected.length : 0;
@@ -540,7 +715,7 @@ async function handleCompile(req, res) {
   const fakeLink = `http://localhost:${PORT}/delivery/${job?.id || safeName(folderName)}`;
   const driveLink = googleTokens?.access_token ? await uploadSelectionToDrive(folderName, selected, body.rooms || []) : fakeLink;
   if (job) {
-    saveJob({
+    await saveJob({
       ...job,
       status: "COMPLETE",
       selected: Object.fromEntries(selected.map(item => [item.roomId, item.image])),
@@ -572,7 +747,7 @@ async function sendViaWhatsApp(agentNumber, message) {
 }
 
 async function handleJobs(_req, res) {
-  const list = [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(publicJob);
+  const list = (await loadAllJobs()).map(publicJob);
   sendJson(res, 200, { jobs: list });
 }
 
@@ -593,7 +768,7 @@ async function handleJobAction(req, res) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-  const job = jobs.get(body.jobId);
+  const job = await loadJob(body.jobId);
   if (!job) return sendJson(res, 404, { error: "Job not found." });
 
   if (body.action === "agent_confirmed") job.status = "PENDING_PAYMENT";
@@ -602,7 +777,7 @@ async function handleJobAction(req, res) {
   if (body.action === "rerun") job.status = "PAYMENT_VERIFIED";
   if (body.action === "complete") job.status = "COMPLETE";
 
-  saveJob(job);
+  await saveJob(job);
   sendJson(res, 200, { job: publicJob(job) });
 }
 
@@ -741,7 +916,7 @@ async function handleGoogleCallback(req, res) {
 
 async function serveStatic(req, res) {
   const url = new URL(req.url, "http://localhost");
-  if (url.pathname.startsWith("/delivery/")) return serveDelivery(url.pathname.split("/").pop(), res);
+  if (url.pathname.startsWith("/delivery/")) return await serveDelivery(url.pathname.split("/").pop(), res);
   let pathname = decodeURIComponent(url.pathname);
   if (pathname === "/") pathname = "/index.html";
 
@@ -768,8 +943,8 @@ async function serveStatic(req, res) {
   }
 }
 
-function serveDelivery(jobId, res) {
-  const job = jobs.get(jobId);
+async function serveDelivery(jobId, res) {
+  const job = await loadJob(jobId);
   const images = job ? Object.values(job.selected || {}) : [];
   const body = `<!doctype html>
     <html><head><title>StageMyHome Delivery</title><style>
