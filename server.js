@@ -16,8 +16,9 @@ await loadDotEnv(path.join(__dirname, ".env"));
 
 const PORT = Number(process.env.PORT || 5173);
 let openAIKey = process.env.OPENAI_API_KEY || "";
+let openAIImageKey = process.env.OPENAI_IMAGE_API_KEY || "";
 let analysisModel = process.env.OPENAI_ANALYSIS_MODEL || "gpt-5.5";
-let imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
+let imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
 let googleClientId = process.env.GOOGLE_CLIENT_ID || "";
 let googleClientSecret = process.env.GOOGLE_CLIENT_SECRET || "";
 let googleRedirectUri = process.env.GOOGLE_REDIRECT_URI || `http://localhost:${PORT}/oauth/google/callback`;
@@ -29,6 +30,11 @@ const supabaseUrl = process.env.SUPABASE_URL || "";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 if (!supabase) console.warn("Supabase not configured — jobs stored in memory only (lost on restart).");
+
+const appUrl = process.env.APP_URL
+  || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : null)
+  || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null)
+  || `http://localhost:${process.env.PORT || 5173}`;
 
 // In-memory fallback used when Supabase is not configured.
 const jobs = new Map();
@@ -98,6 +104,7 @@ function publicJob(job) {
     selected: job.selected || {},
     driveLink: job.driveLink || "",
     agentNotes: job.agentNotes || "",
+    agentJID: job.agentJID || "",
     createdAt: job.createdAt,
     updatedAt: job.updatedAt
   };
@@ -113,6 +120,8 @@ function dbToJob(row, rooms) {
     generated: row.generated_data || {},
     selected: row.selected_data || {},
     agentNotes: row.agent_notes || "",
+    agentJID: row.reply_jid || "",
+    pendingWhatsappMessage: row.pending_whatsapp_message || "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     rooms: (rooms || []).map(r => ({
@@ -180,6 +189,8 @@ async function saveJob(job) {
       generated_data: job.generated || {},
       selected_data: job.selected || {},
       agent_notes: job.agentNotes || null,
+      reply_jid: job.agentJID || null,
+      pending_whatsapp_message: job.pendingWhatsappMessage || null,
       created_at: job.createdAt,
       updated_at: job.updatedAt
     });
@@ -220,6 +231,8 @@ async function createJob({ agentNumber, projectName, rooms, status = "AWAITING_R
     selected: {},
     driveLink: "",
     agentNotes: "",
+    agentJID: "",
+    pendingWhatsappMessage: "",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
@@ -547,6 +560,7 @@ async function handleWhatsAppInbound(req, res) {
   for await (const chunk of req) chunks.push(chunk);
   const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
   const agentNumber = String(body.agentNumber || body.phone || "");
+  const replyJID = String(body.replyJID || "");
   const projectName = String(body.projectName || body.project || "whatsapp-project");
   const recommendedPrompt = String(body.recommendedPrompt || "");
   const roomHints = Array.isArray(body.roomHints) ? body.roomHints : [];
@@ -576,7 +590,7 @@ async function handleWhatsAppInbound(req, res) {
     });
   }
 
-  const job = await createJob({ agentNumber, projectName, rooms, status: "AWAITING_RESPONSES" });
+  const job = await createJob({ agentNumber, projectName, rooms, status: "AWAITING_RESPONSES", agentJID: replyJID });
   sendJson(res, 200, {
     job: publicJob(job),
     rooms,
@@ -624,7 +638,8 @@ async function handleWhatsAppText(req, res) {
 async function generateVariant(room, sourcePath, prompt, variant) {
   await ensureLocalFile(sourcePath, room.sourceUrl);
 
-  if (!openAIKey) {
+  const activeImageKey = openAIImageKey || openAIKey;
+  if (!activeImageKey) {
     return {
       id: crypto.randomUUID(),
       variant,
@@ -646,7 +661,7 @@ async function generateVariant(room, sourcePath, prompt, variant) {
 
   const response = await fetch("https://api.openai.com/v1/images/edits", {
     method: "POST",
-    headers: { authorization: `Bearer ${openAIKey}` },
+    headers: { authorization: `Bearer ${activeImageKey}` },
     body: form
   });
 
@@ -682,8 +697,7 @@ async function handleGenerate(req, res) {
   const generated = [];
   for (const room of rooms) {
     const roomImages = [];
-    const sourcePath = room.sourcePath;
-    if (!sourcePath || !existsSync(sourcePath)) throw new Error(`Missing source image for ${room.room}.`);
+    const sourcePath = room.sourcePath || path.join(uploadsDir, `missing_${room.id}.jpg`);
     const prompt =
       room.finalPrompt ||
       room.suggestedPrompt ||
@@ -695,8 +709,12 @@ async function handleGenerate(req, res) {
   }
 
   if (job) {
-    const generatedMap = Object.fromEntries(generated.map(item => [item.roomId, item.images]));
-    job = await saveJob({ ...job, status: "AWAITING_CURATION", generated: generatedMap });
+    const newMap = Object.fromEntries(generated.map(item => [item.roomId, item.images]));
+    const mergedGenerated = { ...(job.generated || {}) };
+    for (const room of rooms) {
+      mergedGenerated[room.id] = [...(mergedGenerated[room.id] || []), ...(newMap[room.id] || [])];
+    }
+    job = await saveJob({ ...job, status: "AWAITING_CURATION", generated: mergedGenerated });
   }
 
   sendJson(res, 200, { generated, job: job ? publicJob(job) : null });
@@ -712,24 +730,24 @@ async function handleCompile(req, res) {
   const count = Array.isArray(body.selected) ? body.selected.length : 0;
   const selected = Array.isArray(body.selected) ? body.selected : [];
   const folderName = `StageMyHome_${safeName(agentNumber)}_${safeName(projectName)}_${new Date().toISOString().slice(0, 10)}`;
-  const fakeLink = `http://localhost:${PORT}/delivery/${job?.id || safeName(folderName)}`;
-  const driveLink = googleTokens?.access_token ? await uploadSelectionToDrive(folderName, selected, body.rooms || []) : fakeLink;
+  const deliveryLink = googleTokens?.access_token
+    ? await uploadSelectionToDrive(folderName, selected, body.rooms || [])
+    : `${appUrl}/delivery/${job?.id || safeName(folderName)}`;
+  const whatsappMessage = `Your StageMyHome images are ready! Download here: ${deliveryLink}\n\n${count} rooms, staged for your listing. Let us know if you'd like adjustments.`;
   if (job) {
     await saveJob({
       ...job,
       status: "COMPLETE",
       selected: Object.fromEntries(selected.map(item => [item.roomId, item.image])),
-      driveLink
+      driveLink: deliveryLink,
+      pendingWhatsappMessage: job.agentJID ? whatsappMessage : ""
     });
   }
-
-  const whatsappMessage = `Your StageMyHome images are ready! Download here: ${driveLink}\n\n${count} rooms, staged for your listing. Let us know if you'd like adjustments.`;
-  if (job?.agentNumber) await sendViaWhatsApp(job.agentNumber, whatsappMessage);
 
   sendJson(res, 200, {
     folderName,
     count,
-    driveLink,
+    driveLink: deliveryLink,
     whatsappMessage
   });
 }
@@ -744,6 +762,18 @@ async function sendViaWhatsApp(agentNumber, message) {
   } catch (error) {
     console.warn("WhatsApp send skipped:", error.message);
   }
+}
+
+async function handlePendingMessages(_req, res) {
+  const list = await loadAllJobs();
+  const pending = list
+    .filter(job => job.pendingWhatsappMessage && job.agentJID)
+    .map(job => ({ jobId: job.id, replyJID: job.agentJID, message: job.pendingWhatsappMessage }));
+  for (const item of pending) {
+    const job = await loadJob(item.jobId);
+    if (job) await saveJob({ ...job, pendingWhatsappMessage: "" });
+  }
+  sendJson(res, 200, { messages: pending });
 }
 
 async function handleJobs(_req, res) {
@@ -974,6 +1004,7 @@ export async function handleRequest(req, res) {
     }
     if (req.method === "POST" && req.url === "/api/settings") return await handleSettings(req, res);
     if (req.method === "GET" && req.url === "/api/jobs") return await handleJobs(req, res);
+    if (req.method === "GET" && req.url === "/api/pending-messages") return await handlePendingMessages(req, res);
     if (req.url === "/api/demo-config") return await handleDemoConfig(req, res);
     if (req.method === "POST" && req.url === "/api/job-action") return await handleJobAction(req, res);
     if (req.method === "POST" && req.url === "/api/whatsapp/inbound") return await handleWhatsAppInbound(req, res);
