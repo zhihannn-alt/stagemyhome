@@ -270,7 +270,10 @@ function renderApp() {
 
       <div class="dashboard">
         <aside class="sidebar panel">
-          <div class="panel-head"><h2>Jobs</h2></div>
+          <div class="panel-head">
+            <h2>Jobs</h2>
+            <button class="seed-btn" id="seed-demo">+ Demo data</button>
+          </div>
           <div class="panel-body job-list">
             ${state.jobs.length ? state.jobs.map(j => `
               <button class="job-row ${state.activeJob?.id === j.id ? "selected" : ""}" data-job="${j.id}">
@@ -319,6 +322,11 @@ function bindEvents() {
       setActiveJob(state.jobs.find(job => job.id === button.dataset.job));
       render();
     });
+  });
+  $("#seed-demo")?.addEventListener("click", async () => {
+    await fetch("/api/seed-demo", { method: "POST" });
+    await refreshJobs();
+    render();
   });
   $("#agent-confirmed")?.addEventListener("click", () => jobAction("agent_confirmed"));
   $("#verify-payment")?.addEventListener("click", () => jobAction("verify_payment"));
