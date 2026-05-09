@@ -7,8 +7,9 @@ import crypto from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "public");
-const uploadsDir = path.join(__dirname, "uploads");
-const generatedDir = path.join(__dirname, "generated");
+const runtimeDir = process.env.VERCEL ? "/tmp/stagemyhome" : __dirname;
+const uploadsDir = path.join(runtimeDir, "uploads");
+const generatedDir = path.join(runtimeDir, "generated");
 
 await loadDotEnv(path.join(__dirname, ".env"));
 
@@ -784,7 +785,7 @@ function serveDelivery(jobId, res) {
   res.end(body);
 }
 
-const server = http.createServer(async (req, res) => {
+export async function handleRequest(req, res) {
   try {
     if (req.method === "GET" && req.url === "/api/config") {
       return sendJson(res, 200, {
@@ -807,13 +808,19 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && req.url === "/api/analyze") return await handleAnalyze(req, res);
     if (req.method === "POST" && req.url === "/api/generate") return await handleGenerate(req, res);
     if (req.method === "POST" && req.url === "/api/compile") return await handleCompile(req, res);
+    if (req.method === "GET" && req.url.startsWith("/api/delivery/")) return serveDelivery(req.url.split("/").pop(), res);
     return await serveStatic(req, res);
   } catch (error) {
     console.error(error);
     sendJson(res, 500, { error: error.message || "Unexpected server error" });
   }
-});
+}
 
-server.listen(PORT, () => {
-  console.log(`StageMyHome running at http://localhost:${PORT}`);
-});
+export default handleRequest;
+
+if (!process.env.VERCEL) {
+  const server = http.createServer(handleRequest);
+  server.listen(PORT, () => {
+    console.log(`StageMyHome running at http://localhost:${PORT}`);
+  });
+}
