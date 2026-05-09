@@ -212,6 +212,7 @@ type StageMyHomeInboundRequest struct {
 	AgentNumber       string             `json:"agentNumber"`
 	ProjectName       string             `json:"projectName"`
 	RecommendedPrompt string             `json:"recommendedPrompt"`
+	ReplyJID          string             `json:"replyJID"`
 	Photos            []StageMyHomePhoto `json:"photos"`
 }
 
@@ -501,6 +502,7 @@ func sendPhotoToStageMyHome(client *whatsmeow.Client, sender string, replyTo str
 		AgentNumber:       canonicalAgentNumber(sender),
 		ProjectName:       "WhatsApp Demo",
 		RecommendedPrompt: "Create bright, listing-ready, photorealistic Singapore property staging. Preserve room geometry and fixed architecture.",
+		ReplyJID:          replyTo,
 		Photos: []StageMyHomePhoto{{
 			FileName: filename,
 			Mime:     mimeFromMediaType(mediaType),
@@ -990,6 +992,34 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}()
 }
 
+type PendingMessage struct {
+	JobID    string `json:"jobId"`
+	ReplyJID string `json:"replyJID"`
+	Message  string `json:"message"`
+}
+
+type PendingMessagesResponse struct {
+	Messages []PendingMessage `json:"messages"`
+}
+
+func pollAndSendPendingMessages(client *whatsmeow.Client) {
+	resp, err := http.Get(stageMyHomeBaseURL() + "/api/pending-messages")
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	var payload PendingMessagesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return
+	}
+	for _, msg := range payload.Messages {
+		if msg.ReplyJID != "" && msg.Message != "" {
+			fmt.Printf("StageMyHome sending delivery message to %s\n", msg.ReplyJID)
+			sendWhatsAppMessage(client, msg.ReplyJID, msg.Message, "")
+		}
+	}
+}
+
 func main() {
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
@@ -1111,6 +1141,17 @@ func main() {
 
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080)
+
+	// Poll Vercel for pending WhatsApp delivery messages every 5 seconds
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if client.IsConnected() {
+				pollAndSendPendingMessages(client)
+			}
+		}
+	}()
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
