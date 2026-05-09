@@ -11,11 +11,7 @@ const $ = selector => document.querySelector(selector);
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, char => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#039;"
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
   })[char]);
 }
 
@@ -63,7 +59,6 @@ async function generateImages() {
   state.busy = true;
   state.error = "";
   render();
-
   try {
     const rooms = state.activeJob.rooms.map(room => ({
       ...room,
@@ -95,7 +90,6 @@ async function finaliseDelivery() {
   state.busy = true;
   state.error = "";
   render();
-
   try {
     const selected = Object.entries(state.selected).map(([roomId, image]) => ({ roomId, image }));
     const response = await fetch("/api/compile", {
@@ -120,66 +114,144 @@ async function finaliseDelivery() {
   }
 }
 
-function renderJobs() {
-  if (!state.jobs.length) {
-    return `<div class="empty">Waiting for WhatsApp messages from the watched phone number.</div>`;
-  }
-  return state.jobs.map(job => `
-    <button class="job-row ${state.activeJob?.id === job.id ? "selected" : ""}" data-job="${job.id}">
-      <strong>${escapeHtml(job.projectName || "WhatsApp Project")}</strong>
-      <span>${escapeHtml(job.agentNumber)} · ${escapeHtml(statusLabel(job.status))}</span>
-    </button>
-  `).join("");
+// ── Stepper ───────────────────────────────────────────────
+
+const STEPS = [
+  { key: "AWAITING_RESPONSES", label: "Photos received" },
+  { key: "AGENT_RESPONDED",    label: "Agent replied" },
+  { key: "PENDING_PAYMENT",    label: "Awaiting payment" },
+  { key: "PAYMENT_VERIFIED",   label: "Payment verified" },
+  { key: "AWAITING_CURATION",  label: "Images generated" },
+  { key: "COMPLETE",           label: "Delivered" }
+];
+
+function stepIndex(status) {
+  const idx = STEPS.findIndex(s => s.key === status);
+  return idx === -1 ? 0 : idx;
 }
 
-function renderRooms() {
+function renderStepper() {
+  const current = stepIndex(state.activeJob?.status || "AWAITING_RESPONSES");
+  return `<div class="stepper">
+    ${STEPS.map((step, i) => {
+      const cls = i < current ? "done" : i === current ? "active" : "";
+      return `<div class="step-item ${cls}">
+        <div class="step-dot">${i < current ? "✓" : i + 1}</div>
+        <span>${step.label}</span>
+      </div>`;
+    }).join('<div class="step-line"></div>')}
+  </div>`;
+}
+
+// ── Status-driven action bar ──────────────────────────────
+
+function renderActionBar() {
   const job = state.activeJob;
-  if (!job) return `<div class="empty">Select a job to review room analysis.</div>`;
-  return job.rooms.map(room => `
-    <article class="room">
-      <img src="${room.sourceUrl}" alt="${escapeHtml(room.room)}" />
-      <div>
-        <h3>${escapeHtml(room.index)}. ${escapeHtml(room.room)}</h3>
-        <p>${escapeHtml(room.condition)} · ${escapeHtml((room.features || []).join(", "))}</p>
-        <ol class="questions">${(room.questions || []).map(q => `<li>${escapeHtml(q)}</li>`).join("")}</ol>
+  if (!job) return "";
+  const busy = state.busy;
+  const roomCount = job.rooms?.length || 0;
+  const selectedCount = Object.keys(state.selected).length;
+
+  switch (job.status) {
+    case "AWAITING_RESPONSES":
+      return `<div class="action-bar waiting">
+        <span class="action-hint">⏳ Waiting for agent to reply via WhatsApp</span>
+      </div>`;
+
+    case "AGENT_RESPONDED":
+      return `<div class="action-bar">
+        ${job.agentNotes ? `<p class="agent-quote">"${escapeHtml(job.agentNotes)}"</p>` : ""}
+        <button class="action-btn green" id="agent-confirmed" ${busy ? "disabled" : ""}>
+          Confirm agent response
+        </button>
+      </div>`;
+
+    case "PENDING_PAYMENT":
+      return `<div class="action-bar">
+        <div class="action-hint">Invoice sent to ${escapeHtml(job.agentNumber)}</div>
+        <button class="action-btn gold" id="verify-payment" ${busy ? "disabled" : ""}>
+          Verify payment
+        </button>
+      </div>`;
+
+    case "PAYMENT_VERIFIED":
+      return `<div class="action-bar">
+        <div class="action-hint">${roomCount} room${roomCount !== 1 ? "s" : ""} ready to stage</div>
+        <button class="action-btn green" id="generate" ${busy ? "disabled" : ""}>
+          Generate staged images
+        </button>
+      </div>`;
+
+    case "GENERATING":
+      return `<div class="action-bar waiting">
+        <span class="action-hint">⚙️ Generating images… this may take a minute</span>
+      </div>`;
+
+    case "AWAITING_CURATION": {
+      const allSelected = selectedCount === roomCount;
+      return `<div class="action-bar ${allSelected ? "" : "waiting"}">
+        <div class="action-hint">${selectedCount} of ${roomCount} rooms selected</div>
+        <button class="action-btn" id="finalise" ${allSelected && !busy ? "" : "disabled"}>
+          Deliver to agent (${selectedCount}/${roomCount})
+        </button>
+        <button class="action-btn-secondary" id="generate" ${busy ? "disabled" : ""}>
+          Regenerate
+        </button>
+      </div>`;
+    }
+
+    case "COMPLETE":
+      return `<div class="action-bar complete">
+        <span class="action-hint">✓ Delivered to ${escapeHtml(job.agentNumber)}</span>
+        ${job.driveLink ? `<a href="${escapeHtml(job.driveLink)}" target="_blank" class="pill good">View delivery link</a>` : ""}
+        <button class="action-btn-secondary" id="generate" ${busy ? "disabled" : ""}>Regenerate</button>
+      </div>`;
+
+    default:
+      return "";
+  }
+}
+
+// ── Room cards ────────────────────────────────────────────
+
+function renderRoomCard(room) {
+  const job = state.activeJob;
+  const inCuration = ["AWAITING_CURATION", "COMPLETE"].includes(job?.status);
+  const variants = job?.generated?.[room.id] || [];
+  const selectedId = state.selected[room.id]?.id;
+
+  return `<div class="room-card">
+    <div class="room-source">
+      <img src="${escapeHtml(room.sourceUrl)}" alt="${escapeHtml(room.room)}" />
+      <div class="room-meta">
+        <strong>${escapeHtml(room.index)}. ${escapeHtml(room.room)}</strong>
+        <span>${escapeHtml(room.condition)}</span>
+      </div>
+    </div>
+    ${inCuration ? `
+      <div class="room-variants">
+        ${variants.length ? variants.map(img => `
+          <button class="variant ${selectedId === img.id ? "selected" : ""}" data-room="${room.id}" data-image="${img.id}">
+            <img src="${escapeHtml(img.url)}" alt="Staged" />
+            ${selectedId === img.id ? `<div class="variant-check">✓</div>` : ""}
+          </button>
+        `).join("") : `<div class="variant-empty">No images yet</div>`}
+      </div>
+    ` : `
+      <div class="room-detail">
+        ${room.agentNotes || job?.agentNotes ? `
+          <p class="room-pref">${escapeHtml(room.agentNotes || job.agentNotes)}</p>
+        ` : ""}
         <textarea id="prompt-${room.id}" class="prompt">${escapeHtml(room.suggestedPrompt)}</textarea>
       </div>
-    </article>
-  `).join("");
+    `}
+  </div>`;
 }
 
-function renderGenerated() {
-  const job = state.activeJob;
-  if (!job) return `<div class="empty">Generated images will appear after payment verification.</div>`;
-  const generated = job.generated || {};
-  if (!Object.keys(generated).length) return `<div class="empty">No generated images yet.</div>`;
-  return job.rooms.map(room => `
-    <section class="generated-room">
-      <h3>${escapeHtml(room.room)}</h3>
-      <div class="image-grid">
-        ${(generated[room.id] || []).map(image => `
-          <button class="candidate ${state.selected[room.id]?.id === image.id ? "selected" : ""}" data-room="${room.id}" data-image="${image.id}">
-            <img src="${image.url}" alt="${escapeHtml(room.room)} generated" />
-            <span>${image.mock ? "mock source" : "generated image"}</span>
-          </button>
-        `).join("")}
-      </div>
-    </section>
-  `).join("");
-}
-
-function renderTimeline() {
-  const status = state.activeJob?.status || "WAITING_FOR_WHATSAPP";
-  const steps = ["AWAITING_RESPONSES", "AGENT_RESPONDED", "PENDING_PAYMENT", "PAYMENT_VERIFIED", "GENERATING", "AWAITING_CURATION", "COMPLETE"];
-  return steps.map(step => `<span class="flow-step ${status === step ? "active" : ""}">${escapeHtml(statusLabel(step))}</span>`).join("");
-}
+// ── Main render ───────────────────────────────────────────
 
 function renderApp() {
   const job = state.activeJob;
-  const generated = job?.generated || {};
-  const selectedCount = Object.keys(state.selected).length;
-  const roomCount = job?.rooms?.length || 0;
-  const canFinalise = roomCount > 0 && selectedCount === roomCount;
 
   return `
     <div class="shell">
@@ -193,49 +265,50 @@ function renderApp() {
         </div>
         <div class="statusbar">
           <span class="pill ${state.config.hasOpenAIKey ? "good" : ""}">${state.config.hasOpenAIKey ? "OpenAI ready" : "OpenAI missing"}</span>
-          <span class="pill">Bridge ${escapeHtml(state.config.bridgeURL || "local")}</span>
         </div>
       </header>
 
-      <main class="dashboard">
+      <div class="dashboard">
         <aside class="sidebar panel">
           <div class="panel-head"><h2>Jobs</h2></div>
-          <div class="panel-body job-list">${renderJobs()}</div>
+          <div class="panel-body job-list">
+            ${state.jobs.length ? state.jobs.map(j => `
+              <button class="job-row ${state.activeJob?.id === j.id ? "selected" : ""}" data-job="${j.id}">
+                <strong>${escapeHtml(j.projectName || "WhatsApp Project")}</strong>
+                <span>${escapeHtml(j.agentNumber)}</span>
+                <span class="job-status-badge ${j.status === "COMPLETE" ? "done" : ""}">${escapeHtml(statusLabel(j.status))}</span>
+              </button>
+            `).join("") : `<div class="empty">Waiting for WhatsApp messages.</div>`}
+          </div>
         </aside>
 
-        <section class="maincol grid">
-          <section class="panel">
-            <div class="panel-head">
+        <main class="maincol">
+          ${job ? `
+            <div class="project-header">
               <div>
-                <h2>${job ? escapeHtml(job.projectName) : "No Active Job"}</h2>
-                <p class="subtle">${job ? `${escapeHtml(job.agentNumber)} · ${escapeHtml(statusLabel(job.status))}` : "Waiting for WhatsApp intake"}</p>
-              </div>
-              <div class="toolbar">
-                <button class="secondary" id="agent-confirmed" ${job && !state.busy ? "" : "disabled"}>Agent Confirmed</button>
-                <button class="gold" id="verify-payment" ${job && !state.busy ? "" : "disabled"}>Verify Payment</button>
-                <button class="green" id="generate" ${job && !state.busy ? "" : "disabled"}>${Object.keys(generated).length ? "Rerun" : "Generate"}</button>
-                <button id="finalise" ${canFinalise && !state.busy ? "" : "disabled"}>Finalise Delivery</button>
+                <h2>${escapeHtml(job.projectName)}</h2>
+                <p class="subtle">${escapeHtml(job.agentNumber)} · ${job.rooms?.length || 0} rooms</p>
               </div>
             </div>
-            <div class="panel-body">
-              <div class="flow">${renderTimeline()}</div>
-              ${state.error ? `<div class="error">${escapeHtml(state.error)}</div>` : ""}
-              ${job?.agentNotes ? `<p class="note"><strong>Agent preference:</strong> ${escapeHtml(job.agentNotes)}</p>` : ""}
-              ${job?.driveLink ? `<p class="note">Delivery link: <a href="${job.driveLink}" target="_blank">${escapeHtml(job.driveLink)}</a></p>` : ""}
+
+            ${renderStepper()}
+
+            ${state.error ? `<div class="error-bar">${escapeHtml(state.error)}</div>` : ""}
+
+            ${renderActionBar()}
+
+            <div class="rooms-grid">
+              ${(job.rooms || []).map(room => renderRoomCard(room)).join("")}
             </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head"><h2>Room Analysis</h2><span class="pill">${roomCount} rooms</span></div>
-            <div class="panel-body rooms">${renderRooms()}</div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-head"><h2>Curation</h2><span class="pill">${selectedCount} / ${roomCount} selected</span></div>
-            <div class="panel-body grid">${renderGenerated()}</div>
-          </section>
-        </section>
-      </main>
+          ` : `
+            <div class="empty-state">
+              <div class="empty-icon">📱</div>
+              <h3>Waiting for WhatsApp</h3>
+              <p>When a property agent sends photos, the job will appear here.</p>
+            </div>
+          `}
+        </main>
+      </div>
     </div>
   `;
 }
@@ -251,7 +324,7 @@ function bindEvents() {
   $("#verify-payment")?.addEventListener("click", () => jobAction("verify_payment"));
   $("#generate")?.addEventListener("click", generateImages);
   $("#finalise")?.addEventListener("click", finaliseDelivery);
-  document.querySelectorAll(".candidate").forEach(button => {
+  document.querySelectorAll(".variant").forEach(button => {
     button.addEventListener("click", () => {
       const image = (state.activeJob?.generated?.[button.dataset.room] || []).find(item => item.id === button.dataset.image);
       if (image) selectImage(button.dataset.room, image);
