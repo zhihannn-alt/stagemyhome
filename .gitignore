@@ -1,0 +1,6 @@
+.env
+.DS_Store
+node_modules
+uploads
+generated
+vendor/whatsapp-mcp/whatsapp-bridge/store
