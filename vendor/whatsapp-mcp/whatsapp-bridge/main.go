@@ -1191,6 +1191,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 			logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
 			continue
 		}
+		if !shouldProcessStageMyHomeSender(jid.User) {
+			continue
+		}
 
 		// Get appropriate chat name by passing the history sync conversation directly
 		name := GetChatName(client, messageStore, jid, chatJID, conversation, "", logger)
@@ -1263,6 +1266,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					}
 				} else {
 					sender = jid.User
+				}
+				if !isFromMe && !shouldProcessStageMyHomeSender(sender) {
+					continue
 				}
 
 				// Store message
