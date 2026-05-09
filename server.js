@@ -559,6 +559,14 @@ async function handleAnalyze(req, res) {
   sendJson(res, 200, { job: publicJob(job), rooms });
 }
 
+function roomQuestionMessage(room, roomNumber, totalRooms) {
+  const questions = room.questions.map((q, i) => `${i + 1}. ${q}`).join("\n");
+  const header = totalRooms > 1
+    ? `Photo ${roomNumber} of ${totalRooms} – ${room.room} (${room.condition})`
+    : `Photo – ${room.room} (${room.condition})`;
+  return `${header}\n\n${questions}`;
+}
+
 async function handleWhatsAppInbound(req, res) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -598,10 +606,7 @@ async function handleWhatsAppInbound(req, res) {
   sendJson(res, 200, {
     job: publicJob(job),
     rooms,
-    nextMessage: rooms.map(room => {
-      const questions = room.questions.map((q, index) => `${index + 1}. ${q}`).join("\n");
-      return `Photo ${room.index} - ${room.room}\nCurrent state: ${room.condition}\n\n${questions}`;
-    }).join("\n\n---\n\n")
+    nextMessage: roomQuestionMessage(rooms[0], 1, rooms.length)
   });
 }
 
@@ -634,10 +639,11 @@ async function handleWhatsAppText(req, res) {
           status: allDone ? "AGENT_RESPONDED" : "AWAITING_RESPONSES"
         });
         if (allDone) {
-          sendJson(res, 200, { reply: `All noted! Your operator will review and generate the staged images shortly.` });
+          sendJson(res, 200, { reply: `Got it for the ${targetRoom.room}! All preferences noted — your operator will generate the staged images shortly.` });
         } else {
           const nextRoom = openJob.rooms[nextIdx];
-          sendJson(res, 200, { reply: `Got it for the ${targetRoom.room}! Now share your preferences for the ${nextRoom.room}.` });
+          const nextQ = roomQuestionMessage(nextRoom, nextIdx + 1, openJob.rooms.length);
+          sendJson(res, 200, { reply: `Got it for the ${targetRoom.room}!\n\n${nextQ}` });
         }
         return;
       }
