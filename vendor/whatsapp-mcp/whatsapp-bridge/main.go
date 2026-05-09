@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
 	"net/http"
@@ -992,14 +993,34 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}()
 }
 
+type PendingImageItem struct {
+	URL  string `json:"url"`
+	Room string `json:"room"`
+}
+
 type PendingMessage struct {
-	JobID    string `json:"jobId"`
-	ReplyJID string `json:"replyJID"`
-	Message  string `json:"message"`
+	JobID    string             `json:"jobId"`
+	ReplyJID string             `json:"replyJID"`
+	Message  string             `json:"message"`
+	Images   []PendingImageItem `json:"images,omitempty"`
 }
 
 type PendingMessagesResponse struct {
 	Messages []PendingMessage `json:"messages"`
+}
+
+func downloadToTemp(url string, index int) (string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	tmpPath := filepath.Join(os.TempDir(), fmt.Sprintf("stagemyhome_%d_%d.jpg", time.Now().UnixNano(), index))
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return tmpPath, os.WriteFile(tmpPath, data, 0644)
 }
 
 func pollAndSendPendingMessages(client *whatsmeow.Client) {
@@ -1013,8 +1034,21 @@ func pollAndSendPendingMessages(client *whatsmeow.Client) {
 		return
 	}
 	for _, msg := range payload.Messages {
-		if msg.ReplyJID != "" && msg.Message != "" {
-			fmt.Printf("StageMyHome sending delivery message to %s\n", msg.ReplyJID)
+		if msg.ReplyJID == "" {
+			continue
+		}
+		fmt.Printf("StageMyHome delivering %d images to %s\n", len(msg.Images), msg.ReplyJID)
+		for i, img := range msg.Images {
+			tmpPath, err := downloadToTemp(img.URL, i)
+			if err != nil {
+				fmt.Printf("StageMyHome: failed to download image for %s: %v\n", img.Room, err)
+				continue
+			}
+			caption := img.Room
+			sendWhatsAppMessage(client, msg.ReplyJID, caption, tmpPath)
+			os.Remove(tmpPath)
+		}
+		if msg.Message != "" {
 			sendWhatsAppMessage(client, msg.ReplyJID, msg.Message, "")
 		}
 	}
